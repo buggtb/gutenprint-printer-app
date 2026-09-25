@@ -4,16 +4,16 @@
 # vendor-option budget are actually exposed and honoured by the shipped
 # image (issue #9).
 #
-# This script runs against the real, running FSDK OCI image ($IMAGE) built
-# by `just build` (no mock echoes, no synthetic PPD parsing):
+# `just verify` builds the real image and runs this script against it (no
+# mock echoes, no synthetic PPD parsing):
 #
-#   1. Confirms the image registers an expert (non-"Simplified") Gutenprint
-#      driver -- i.e. PAPPL_MAX_VENDOR >= 256 actually took effect for this
-#      build, per the driver_display_regex selection in
+#   1. Confirms the app registers expert, and no "Simplified", Gutenprint
+#      drivers -- i.e. PAPPL_MAX_VENDOR >= 256 from the shared printing base
+#      actually took effect, per the driver_display_regex selection in
 #      gutenprint-printer-app.c.
-#   2. Adds a printer with that driver and confirms `options` reports more
-#      than 32 vendor/job options -- proving the raised PAPPL vendor-option
-#      ceiling, not just the simplified 32-option PPD set, is in force.
+#   2. Adds a printer with the expert Epson Stylus Photo R1800 driver and
+#      confirms `options` reports more than 32 distinct vendor options --
+#      proving the raised PAPPL vendor-option ceiling is in force.
 #   3. Picks one supported non-default vendor option value, submits a print
 #      job with it set, and diffs the bytes captured at the socket sink
 #      against a baseline job printed with defaults -- proving the option
@@ -27,6 +27,7 @@ SINK_PORT="$((PORT + 1))"
 STATE_DIR="$(mktemp -d)"
 BASELINE_SINK="$(mktemp)"
 CHANGED_SINK="$(mktemp)"
+COOKIE_JAR="$(mktemp)"
 SINK_PID=""
 
 cleanup() {
@@ -36,7 +37,7 @@ cleanup() {
     wait "$SINK_PID" 2>/dev/null || true
   fi
   podman unshare rm -rf "$STATE_DIR" 2>/dev/null || true
-  rm -f "$BASELINE_SINK" "$CHANGED_SINK"
+  rm -f "$BASELINE_SINK" "$CHANGED_SINK" "$COOKIE_JAR"
 }
 trap cleanup EXIT
 
@@ -44,30 +45,6 @@ fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
-
-# --- pick an expert (non-Simplified) Gutenprint driver ----------------------
-pick_expert_driver() {
-  local drivers driver
-  drivers="$(podman run --rm --entrypoint /usr/bin/bash "$IMAGE" -c \
-    'gutenprint-printer-app drivers 2>/dev/null' || true)"
-  # Expert PPDs are named "... - CUPS+Gutenprint <version> <model>", the
-  # simplified ones carry a trailing "Simplified" marker (see
-  # driver_display_regex in gutenprint-printer-app.c).
-  driver="$(printf '%s\n' "$drivers" \
-    | grep -Ei 'CUPS\+Gutenprint' \
-    | grep -Eiv 'simplified' \
-    | head -n1 || true)"
-  printf '%s' "$driver" | sed -E 's/^([^ ]+).*/\1/'
-}
-
-DRIVER="$(pick_expert_driver)"
-if [[ -z "$DRIVER" ]]; then
-  echo "Full driver list for diagnosis:" >&2
-  podman run --rm --entrypoint /usr/bin/bash "$IMAGE" -c \
-    'gutenprint-printer-app drivers 2>/dev/null' >&2 || true
-  fail "no expert (non-Simplified) CUPS+Gutenprint driver found -- PAPPL_MAX_VENDOR patch did not take effect in this image"
-fi
-echo "Using expert driver: $DRIVER"
 
 chmod 0777 "$STATE_DIR"
 
@@ -89,14 +66,28 @@ for _ in $(seq 1 120); do
 done
 [[ "$ready" -eq 1 ]] || { podman logs "$NAME" >&2 || true; fail "web server did not become ready"; }
 
+SYSTEM_URI="ipp://127.0.0.1:${PORT}/ipp/system"
+
+# --- the app registers expert, not simplified, Gutenprint PPDs --------------
+# gutenprint-printer-app.c only selects the expert PPDs (driver_display_regex)
+# when PAPPL_MAX_VENDOR >= 256; otherwise it registers the "Simplified" ones.
+# pappl-retrofit strips the "CUPS+Gutenprint" suffix from the descriptions.
+drivers="$(podman exec "$NAME" gutenprint-printer-app -u "$SYSTEM_URI" drivers)"
+if grep -qi 'simplified' <<<"$drivers"; then
+  fail "simplified Gutenprint PPDs are registered -- PAPPL_MAX_VENDOR patch did not take effect in this image"
+fi
+DRIVER="$(awk '/"Epson Stylus Photo R1800 \(en\)"/ { print $1; exit }' <<<"$drivers")"
+if [[ -z "$DRIVER" ]]; then
+  printf '%s\n' "$drivers" >&2
+  fail "no expert Epson Stylus Photo R1800 driver registered"
+fi
+echo "Using expert driver: $DRIVER"
+
 PRINTER="vendor-options-test"
 PRINTER_URI="ipp://127.0.0.1:${PORT}/ipp/print/${PRINTER}"
-COOKIE_JAR="$(mktemp)"
-trap 'rm -f "$COOKIE_JAR"' EXIT
-
-# Create the printer through PAPPL's non-IPP web form, the same path
-# tests/socket-print.sh uses. gutenprint-printer-app's CLI '-u'/'-v' flags
-# name the *server*'s IPP URI, not a device to add.
+# Create the printer through PAPPL's web form, the same path
+# tests/socket-print.sh uses: the shared PAPPL patch maps its "socket" device
+# type to the CUPS socket backend.
 add_page="$(curl --fail --silent --show-error --insecure --location \
   --cookie-jar "$COOKIE_JAR" "https://127.0.0.1:${PORT}/addprinter")"
 [[ "$add_page" == *'value="socket"'* && "$add_page" == *'name="hostname"'* ]] \
@@ -115,17 +106,21 @@ curl --fail --silent --show-error --insecure --location \
   "https://127.0.0.1:${PORT}/addprinter" >/dev/null
 
 # --- confirm the vendor-option budget is actually available ----------------
+# Standard IPP job attributes PAPPL renders for every driver; everything else
+# is a PPD vendor option, which stock PAPPL caps at 32.
+ipp_options='^(copies|media|media-source|media-type|orientation-requested|output-bin|print-color-mode|print-content-optimize|print-darkness|print-quality|print-scaling|print-speed|printer-resolution|sides)$'
 options_output="$(podman exec "$NAME" gutenprint-printer-app -u "$PRINTER_URI" options)"
-option_count="$(printf '%s\n' "$options_output" | grep -Ec '^[[:space:]]*-o ')"
-echo "Reported $option_count '-o' option lines for $DRIVER"
+option_count="$(grep -Eo '^[[:space:]]*-o [A-Za-z0-9_-]+=' <<<"$options_output" \
+  | sed -E 's/^[[:space:]]*-o //; s/=$//' | sort -u | grep -Evc "$ipp_options" || true)"
+echo "Reported $option_count distinct vendor options for $DRIVER"
 [[ "$option_count" -gt 32 ]] \
-  || fail "only $option_count options reported; expected more than 32 (PAPPL_MAX_VENDOR budget not exposed)"
+  || fail "only $option_count vendor options reported; expected more than 32 (PAPPL_MAX_VENDOR budget not exposed)"
 
 # --- pick one non-default vendor option value to flip -----------------------
-# Look for a Gutenprint-specific keyword option (skip the generic IPP-ish
-# ones already covered by issue #6's core payload test) with at least one
+# Look for a Gutenprint-specific keyword option (skip the standard IPP
+# attributes, which the socket-print test already covers) with at least one
 # alternative to its default.
-read -r opt_name opt_default opt_alt < <(printf '%s\n' "$options_output" | awk '
+read -r opt_name opt_default opt_alt < <(printf '%s\n' "$options_output" | awk -v ipp="$ipp_options" '
   /^[[:space:]]*-o [A-Za-z0-9_-]+=.*\(default\)/ {
     line=$0
     sub(/^[[:space:]]*-o /, "", line)
@@ -143,7 +138,7 @@ read -r opt_name opt_default opt_alt < <(printf '%s\n' "$options_output" | awk '
     split(line, kv, "=")
     name=kv[1]
     val=kv[2]
-    if (name in defaults && !(name in alt) && val != defaults[name] && name !~ /^(copies|media|orientation-requested|print-color-mode|print-quality|printer-resolution|output-bin|media-source)$/) {
+    if (name in defaults && !(name in alt) && val != defaults[name] && name !~ ipp) {
       alt[name]=val
     }
   }
@@ -166,13 +161,13 @@ print_with_sink() {
   SINK_PID=$!
   sleep 0.2
   if [[ -n "$option_setting" ]]; then
-    podman exec "$NAME" gutenprint-printer-app \
-      -u "$PRINTER_URI" -d "$PRINTER" -o "$option_setting" \
-      /usr/share/gutenprint-printer-app/testpage.pdf submit >/dev/null
+    podman exec "$NAME" gutenprint-printer-app submit \
+      -u "$PRINTER_URI" -o "$option_setting" \
+      /usr/share/gutenprint-printer-app/testpage.pdf >/dev/null
   else
-    podman exec "$NAME" gutenprint-printer-app \
-      -u "$PRINTER_URI" -d "$PRINTER" \
-      /usr/share/gutenprint-printer-app/testpage.pdf submit >/dev/null
+    podman exec "$NAME" gutenprint-printer-app submit \
+      -u "$PRINTER_URI" \
+      /usr/share/gutenprint-printer-app/testpage.pdf >/dev/null
   fi
   local received=0
   for _ in $(seq 1 180); do

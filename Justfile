@@ -54,12 +54,11 @@ export:
 verify:
     just build
     tests/no-devel.sh
-    tests/check-max-vendor-patch.sh
+    tests/vendor-options-payload.sh
     tests/cups-owner.sh
     tests/appliance.sh
     tests/socket-print.sh
     tests/testpage-payload.sh
-    tests/vendor-options-payload.sh
 
 sbom:
     #!/usr/bin/env bash
