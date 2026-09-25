@@ -4,9 +4,8 @@
 # vendor-option budget are actually exposed and honoured by the shipped
 # image (issue #9).
 #
-# The CI workflow builds the real rock and loads it into podman, passing it
-# via $IMAGE. This script then, against that running image only (no mock
-# echoes, no synthetic PPD parsing):
+# This script runs against the real, running FSDK OCI image ($IMAGE) built
+# by `just build` (no mock echoes, no synthetic PPD parsing):
 #
 #   1. Confirms the image registers an expert (non-"Simplified") Gutenprint
 #      driver -- i.e. PAPPL_MAX_VENDOR >= 256 actually took effect for this
@@ -92,11 +91,28 @@ done
 
 PRINTER="vendor-options-test"
 PRINTER_URI="ipp://127.0.0.1:${PORT}/ipp/print/${PRINTER}"
-podman exec "$NAME" gutenprint-printer-app \
-  -u "cups:socket://127.0.0.1:${SINK_PORT}" \
-  -d "$PRINTER" \
-  -m "$DRIVER" \
-  add
+COOKIE_JAR="$(mktemp)"
+trap 'rm -f "$COOKIE_JAR"' EXIT
+
+# Create the printer through PAPPL's non-IPP web form, the same path
+# tests/socket-print.sh uses. gutenprint-printer-app's CLI '-u'/'-v' flags
+# name the *server*'s IPP URI, not a device to add.
+add_page="$(curl --fail --silent --show-error --insecure --location \
+  --cookie-jar "$COOKIE_JAR" "https://127.0.0.1:${PORT}/addprinter")"
+[[ "$add_page" == *'value="socket"'* && "$add_page" == *'name="hostname"'* ]] \
+  || fail "add-printer form did not offer a 'socket' device type"
+ADD_SESSION="${add_page#*name=\"session\" value=\"}"
+ADD_SESSION="${ADD_SESSION%%\"*}"
+[[ -n "$ADD_SESSION" && "$ADD_SESSION" != "$add_page" ]] \
+  || fail "could not find CSRF session token on the add-printer form"
+curl --fail --silent --show-error --insecure --location \
+  --cookie "$COOKIE_JAR" --cookie-jar "$COOKIE_JAR" \
+  --data-urlencode "session=$ADD_SESSION" \
+  --data-urlencode "printer_name=${PRINTER}" \
+  --data-urlencode "driver_name=$DRIVER" \
+  --data-urlencode 'device_uri=socket' \
+  --data-urlencode "hostname=127.0.0.1:${SINK_PORT}" \
+  "https://127.0.0.1:${PORT}/addprinter" >/dev/null
 
 # --- confirm the vendor-option budget is actually available ----------------
 options_output="$(podman exec "$NAME" gutenprint-printer-app -u "$PRINTER_URI" options)"
