@@ -100,7 +100,7 @@ parts:
     source: https://github.com/openprinting/pappl-retrofit
     source-type: git
     # source-tag: '1.0b2'
-    source-depth: 1
+    source-commit: 1626b338fc8b92a99c2c1a483ac39c739d71b305
 # ext:updatesnap
 #   version-format:
 #     ignore: true
@@ -571,6 +571,7 @@ parts:
     plugin: autotools
     source: https://github.com/avahi/avahi.git
     source-type: git
+    source-commit: ef903fb0a29bc4394c5a76309405e5a827a4e390
     autotools-configure-parameters:
       - --prefix=/usr
       - --disable-qt3
