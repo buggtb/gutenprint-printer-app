@@ -99,7 +99,6 @@ echo "Using expert driver: $DRIVER"
 start_container
 
 PRINTER="device-settings-test"
-PRINTER_URI="ipp://127.0.0.1:${PORT}/ipp/print/${PRINTER}"
 podman exec "$NAME" gutenprint-printer-app \
   -u "cups:socket://127.0.0.1:${SINK_PORT}" \
   -d "$PRINTER" \

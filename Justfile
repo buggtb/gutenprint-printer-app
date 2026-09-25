@@ -56,6 +56,7 @@ verify:
     tests/no-devel.sh
     tests/cups-owner.sh
     tests/appliance.sh
+    tests/device-settings-web-admin.sh
     tests/socket-print.sh
     tests/testpage-payload.sh
 
