@@ -1,0 +1,72 @@
+name: Device settings web admin (issue #11)
+
+on:
+  pull_request:
+    branches:
+      - testing
+    paths:
+      - "gutenprint-printer-app.c"
+      - "rockcraft.yaml"
+      - "snap/snapcraft.yaml"
+      - "tests/device-settings-web-admin.sh"
+      - "tests/pick-vendor-option.py"
+      - "tests/socket-sink.py"
+      - ".github/workflows/device-settings-web-admin-ci.yml"
+  push:
+    branches:
+      - testing
+    paths:
+      - "gutenprint-printer-app.c"
+      - "rockcraft.yaml"
+      - "snap/snapcraft.yaml"
+      - "tests/device-settings-web-admin.sh"
+      - "tests/pick-vendor-option.py"
+      - "tests/socket-sink.py"
+      - ".github/workflows/device-settings-web-admin-ci.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: device-settings-web-admin-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: shellcheck
+        run: shellcheck tests/device-settings-web-admin.sh
+
+      - name: Python syntax check
+        run: |
+          python3 -c "import ast; ast.parse(open('tests/pick-vendor-option.py').read())"
+          python3 -c "import ast; ast.parse(open('tests/socket-sink.py').read())"
+
+  device-settings-payload:
+    needs: shellcheck
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Pack with Rockcraft
+        uses: canonical/craft-actions/rockcraft-pack@main
+        id: rockcraft
+
+      - name: Load rock into podman
+        run: |
+          podman pull "oci-archive:${{ steps.rockcraft.outputs.rock }}"
+          podman tag "$(podman images --format '{{.Repository}}:{{.Tag}}' | head -n1)" gutenprint-printer-app:build
+
+      - name: Verify device settings web admin persistence and payload
+        env:
+          IMAGE: gutenprint-printer-app:build
+        run: bash tests/device-settings-web-admin.sh
