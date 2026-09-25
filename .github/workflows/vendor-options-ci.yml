@@ -1,0 +1,89 @@
+name: Vendor Options CI
+
+# Real-image verification for issue #9: the PAPPL_MAX_VENDOR=256 patch must
+# keep Gutenprint's expert (non-Simplified) PPDs registered, with more than
+# 32 vendor options, and a changed option must reach the real filter output.
+# A cheap static guard runs first and fails fast on regression to the source
+# patch without needing any build tooling; the runtime job then builds the
+# real rock and exercises it end to end (no synthetic mocks).
+on:
+  push:
+    branches: [testing]
+    paths:
+      - .github/workflows/vendor-options-ci.yml
+      - rockcraft.yaml
+      - snap/snapcraft.yaml
+      - gutenprint-printer-app.c
+      - tests/check-max-vendor-patch.sh
+      - tests/vendor-options-payload.sh
+      - tests/socket-sink.py
+  pull_request:
+    branches: [testing]
+    paths:
+      - .github/workflows/vendor-options-ci.yml
+      - rockcraft.yaml
+      - snap/snapcraft.yaml
+      - gutenprint-printer-app.c
+      - tests/check-max-vendor-patch.sh
+      - tests/vendor-options-payload.sh
+      - tests/socket-sink.py
+  workflow_dispatch:
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  static-guard:
+    name: Guard PAPPL_MAX_VENDOR patch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check PAPPL_MAX_VENDOR patch is preserved
+        run: bash tests/check-max-vendor-patch.sh
+
+  vendor-options-verify:
+    name: Build & verify vendor options
+    needs: static-guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install build tools
+        run: |
+          sudo snap install rockcraft --classic
+          sudo apt-get update
+          sudo apt-get install --yes podman skopeo fuse3
+
+      - name: Build rock
+        uses: canonical/craft-actions/rockcraft-pack@main
+        id: rockcraft
+
+      - name: Load rock into podman
+        run: |
+          set -euo pipefail
+          ROCK="${{ steps.rockcraft.outputs.rock }}"
+          skopeo copy --insecure-policy oci-archive:"${ROCK}" docker-archive:/tmp/gutenprint.tar
+          podman load -i /tmp/gutenprint.tar
+          IMG="$(podman images --format '{{.Repository}}:{{.Tag}}' | grep gutenprint-printer-app | head -n1)"
+          podman tag "$IMG" gutenprint-printer-app:build
+
+      - name: Run vendor-options verification
+        run: bash tests/vendor-options-payload.sh
+        env:
+          IMAGE: gutenprint-printer-app:build
+          PORT: "18100"
