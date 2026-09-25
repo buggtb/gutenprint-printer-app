@@ -26,7 +26,7 @@
 #      reaches the real filter output, not just the printer's job ticket.
 set -euo pipefail
 
-IMAGE="${IMAGE:-gutenprint-printer-app:build}"
+IMAGE="${IMAGE:-ghcr.io/projectbluefin/gutenprint-printer-app:build}"
 NAME="gutenprint-printer-app-device-settings"
 PORT="${PORT:-18200}"
 SINK_PORT="$((PORT + 1))"
@@ -164,9 +164,17 @@ print_with_sink() {
   python3 tests/socket-sink.py "$SINK_PORT" "$out_file" &
   SINK_PID=$!
   sleep 0.2
-  podman exec "$NAME" gutenprint-printer-app \
-    -u "$PRINTER_URI" -d "$PRINTER" \
-    /usr/share/gutenprint-printer-app/testpage.pdf submit >/dev/null
+  # Same print-test-page action socket-print.sh uses: enters via PAPPL's
+  # HTTP/IPP print-test-page action rather than a static testpage.pdf,
+  # which is a Rockcraft/Snap-only packaged resource not present here.
+  local session
+  session="$(curl --fail --silent --show-error -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+    "http://127.0.0.1:${PORT}/${PRINTER}/" | extract_session_token)"
+  [[ -n "$session" ]] || fail "could not find CSRF session token on the printer status page"
+  curl --fail --silent --show-error -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+    --data-urlencode "session=${session}" \
+    --data 'action=print-test-page' \
+    "http://127.0.0.1:${PORT}/${PRINTER}/" >/dev/null
   local received=0
   for _ in $(seq 1 180); do
     [[ -s "$out_file" ]] && { received=1; break; }
