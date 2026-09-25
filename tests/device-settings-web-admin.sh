@@ -83,11 +83,15 @@ pick_expert_driver() {
   local drivers driver
   drivers="$(podman run --rm --entrypoint /usr/bin/bash "$IMAGE" -c \
     'gutenprint-printer-app drivers 2>/dev/null' || true)"
-  driver="$(printf '%s\n' "$drivers" \
-    | grep -Ei 'CUPS\+Gutenprint' \
-    | grep -Eiv 'simplified' \
-    | head -n1 || true)"
-  printf '%s' "$driver" | sed -E 's/^([^ ]+).*/\1/'
+  driver="$(printf '%s\n' "$drivers" | python3 -c '
+import sys
+for line in sys.stdin:
+    low = line.lower()
+    if "cups+gutenprint" in low and "simplified" not in low:
+        print(line.split()[0].strip("\""))
+        break
+')"
+  printf '%s' "$driver"
 }
 
 DRIVER="$(pick_expert_driver)"
@@ -99,13 +103,29 @@ echo "Using expert driver: $DRIVER"
 start_container
 
 PRINTER="device-settings-test"
-podman exec "$NAME" gutenprint-printer-app \
-  -u "cups:socket://127.0.0.1:${SINK_PORT}" \
-  -d "$PRINTER" \
-  -m "$DRIVER" \
-  add
 
-DEFAULTS_URL="http://127.0.0.1:${PORT}/ipp/print/${PRINTER}/printing"
+# Create the printer through PAPPL's non-IPP web form, the same path
+# tests/socket-print.sh uses. gutenprint-printer-app's CLI '-u'/'-v' flags
+# name the *server*'s IPP URI, not a device -- a device to add must go
+# through this form (or the shared PAPPL patch's cups:socket mapping).
+add_page="$(curl --fail --silent --show-error --insecure --location \
+  --cookie-jar "$COOKIE_JAR" "https://127.0.0.1:${PORT}/addprinter")"
+[[ "$add_page" == *'value="socket"'* && "$add_page" == *'name="hostname"'* ]] \
+  || fail "add-printer form did not offer a 'socket' device type"
+ADD_SESSION="${add_page#*name=\"session\" value=\"}"
+ADD_SESSION="${ADD_SESSION%%\"*}"
+[[ -n "$ADD_SESSION" && "$ADD_SESSION" != "$add_page" ]] \
+  || fail "could not find CSRF session token on the add-printer form"
+curl --fail --silent --show-error --insecure --location \
+  --cookie "$COOKIE_JAR" --cookie-jar "$COOKIE_JAR" \
+  --data-urlencode "session=$ADD_SESSION" \
+  --data-urlencode "printer_name=${PRINTER}" \
+  --data-urlencode "driver_name=$DRIVER" \
+  --data-urlencode 'device_uri=socket' \
+  --data-urlencode "hostname=127.0.0.1:${SINK_PORT}" \
+  "https://127.0.0.1:${PORT}/addprinter" >/dev/null
+
+DEFAULTS_URL="http://127.0.0.1:${PORT}/${PRINTER}/printing"
 
 fetch_defaults_page() {
   curl --fail --silent --show-error -c "$COOKIE_JAR" -b "$COOKIE_JAR" "$DEFAULTS_URL"
