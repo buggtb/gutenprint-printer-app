@@ -78,36 +78,25 @@ stop_container() {
 
 chmod 0777 "$STATE_DIR"
 
-# --- pick an expert (non-Simplified) Gutenprint driver ----------------------
-pick_expert_driver() {
-  local drivers driver
-  drivers="$(podman run --rm --entrypoint /usr/bin/bash "$IMAGE" -c \
-    'gutenprint-printer-app drivers 2>/dev/null' || true)"
-  driver="$(printf '%s\n' "$drivers" | python3 -c '
-import sys
-for line in sys.stdin:
-    low = line.lower()
-    if "cups+gutenprint" in low and "simplified" not in low:
-        print(line.split()[0].strip("\""))
-        break
-')"
-  printf '%s' "$driver"
-}
-
-DRIVER="$(pick_expert_driver)"
-if [[ -z "$DRIVER" ]]; then
-  fail "no expert (non-Simplified) CUPS+Gutenprint driver found -- see issue #9"
-fi
-echo "Using expert driver: $DRIVER"
-
 start_container
+SYSTEM_URI="ipp://127.0.0.1:${PORT}/ipp/system"
+
+# --- pick the expert Gutenprint driver --------------------------------------
+# pappl-retrofit strips the "CUPS+Gutenprint" suffix from descriptions; with
+# PAPPL_MAX_VENDOR >= 256 the app registers only the expert PPDs.
+DRIVERS="$(podman exec "$NAME" gutenprint-printer-app -u "$SYSTEM_URI" drivers)"
+if grep -qi 'simplified' <<<"$DRIVERS"; then
+  fail "simplified Gutenprint PPDs are registered -- see issue #9"
+fi
+DRIVER="$(awk '/"Epson Stylus Photo R1800 \(en\)"/ { print $1; exit }' <<<"$DRIVERS")"
+[[ -n "$DRIVER" ]] || fail "no expert Epson Stylus Photo R1800 driver registered -- see issue #9"
+echo "Using expert driver: $DRIVER"
 
 PRINTER="device-settings-test"
 
-# Create the printer through PAPPL's non-IPP web form, the same path
-# tests/socket-print.sh uses. gutenprint-printer-app's CLI '-u'/'-v' flags
-# name the *server*'s IPP URI, not a device -- a device to add must go
-# through this form (or the shared PAPPL patch's cups:socket mapping).
+# Create the printer through PAPPL's web form, the same path
+# tests/socket-print.sh uses: the shared PAPPL patch maps its "socket" device
+# type to the CUPS socket backend.
 add_page="$(curl --fail --silent --show-error --insecure --location \
   --cookie-jar "$COOKIE_JAR" "https://127.0.0.1:${PORT}/addprinter")"
 [[ "$add_page" == *'value="socket"'* && "$add_page" == *'name="hostname"'* ]] \
@@ -161,8 +150,9 @@ curl --fail --silent --show-error -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
   -o /dev/null
 
 PAGE_2="$(fetch_defaults_page)"
-printf '%s\n' "$PAGE_2" \
-  | grep -Eq "name=\"${opt_name}\">.*<option value=\"${opt_alt}\" selected" \
+# A here-string, not a pipe: grep -q exits early and pipefail would turn
+# the writer's SIGPIPE into a false failure on this ~130 KiB page.
+grep -Eq "name=\"${opt_name}\">.*<option value=\"${opt_alt}\" selected" <<<"$PAGE_2" \
   || fail "web admin did not report '$opt_name' as '$opt_alt' after the POST"
 echo "OK: web admin now reports $opt_name=$opt_alt"
 
@@ -172,8 +162,9 @@ start_container
 
 SESSION_3="$(fetch_defaults_page | extract_session_token)"
 PAGE_3="$(fetch_defaults_page)"
-printf '%s\n' "$PAGE_3" \
-  | grep -Eq "name=\"${opt_name}\">.*<option value=\"${opt_alt}\" selected" \
+# A here-string, not a pipe: grep -q exits early and pipefail would turn
+# the writer's SIGPIPE into a false failure on this ~130 KiB page.
+grep -Eq "name=\"${opt_name}\">.*<option value=\"${opt_alt}\" selected" <<<"$PAGE_3" \
   || fail "'$opt_name=$opt_alt' did not survive a container restart"
 echo "OK: $opt_name=$opt_alt persisted across a container restart"
 
@@ -183,9 +174,8 @@ print_with_sink() {
   python3 tests/socket-sink.py "$SINK_PORT" "$out_file" &
   SINK_PID=$!
   sleep 0.2
-  # Same print-test-page action socket-print.sh uses: enters via PAPPL's
-  # HTTP/IPP print-test-page action rather than a static testpage.pdf,
-  # which is a Rockcraft/Snap-only packaged resource not present here.
+  # Same print-test-page action socket-print.sh uses, so the job takes the
+  # printer's saved defaults exactly as a user's test print would.
   local session
   session="$(curl --fail --silent --show-error -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
     "http://127.0.0.1:${PORT}/${PRINTER}/" | extract_session_token)"

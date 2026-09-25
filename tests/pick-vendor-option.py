@@ -25,7 +25,8 @@ with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
 ipp_names = {
     "media-source", "media-type", "orientation-requested", "print-color-mode",
     "print-quality", "print-content-optimize", "printer-resolution",
-    "output-bin", "sides", "copies",
+    "output-bin", "sides", "copies", "print-scaling", "print-darkness",
+    "print-speed",
 }
 
 best = None
