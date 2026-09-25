@@ -21,7 +21,7 @@
 #      change reaches the real filter output, not just the job ticket.
 set -euo pipefail
 
-IMAGE="${IMAGE:-gutenprint-printer-app:build}"
+IMAGE="${IMAGE:-ghcr.io/projectbluefin/gutenprint-printer-app:build}"
 NAME="gutenprint-printer-app-vendor-options"
 PORT="${PORT:-18100}"
 SINK_PORT="$((PORT + 1))"
